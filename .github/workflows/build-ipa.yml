@@ -1,12 +1,12 @@
 name: Build CodeApp IPA
 
 on:
-  workflow_dispatch: # 支持手动一键运行
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 90 # 预防超时中断
+    timeout-minutes: 90
 
     steps:
       - name: 检出仓库代码
@@ -15,36 +15,58 @@ jobs:
       - name: 设置 Xcode 版本
         run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
 
-      - name: 下载内置环境依赖 (Python/Node/PHP等)
+      - name: 下载内置依赖库
         run: |
           chmod +x ./downloadFrameworks.sh
           ./downloadFrameworks.sh
 
-      - name: 打印工程 Schemes 列表 (供排查核对)
-        run: xcodebuild -list -project Code.xcodeproj
-
-      - name: 编译并归档工程 (Archive)
+      - name: 检查工程配置并编译打包
         run: |
-          xcodebuild archive \
-            -project Code.xcodeproj \
-            -scheme Code \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -archivePath build/Code.xcarchive \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
+          echo "=== 查看工程中的 Targets 和 Schemes ==="
+          xcodebuild -list -project Code.xcodeproj
 
-      - name: 打包生成未签名 IPA
-        run: |
-          mkdir -p Payload
-          # 将编译生成的 .app 移动到 Payload 目录
-          cp -r build/Code.xcarchive/Products/Applications/*.app Payload/
-          # 压缩打包为 IPA
+          # 查找包含 Code 的 Scheme（优先匹配 "Code App"）
+          SCHEME=$(xcodebuild -list -project Code.xcodeproj | awk '/Schemes:/{flag=1; next} flag' | sed -e 's/^[ \t]*//' | grep -i 'Code' | head -n 1)
+
+          if [ -n "$SCHEME" ]; then
+            echo ">>> 检测到有效 Scheme: [$SCHEME]，执行 Archive..."
+            xcodebuild archive \
+              -project Code.xcodeproj \
+              -scheme "$SCHEME" \
+              -configuration Release \
+              -destination 'generic/platform=iOS' \
+              -archivePath build/Code.xcarchive \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY=""
+
+            mkdir -p Payload
+            cp -r build/Code.xcarchive/Products/Applications/*.app Payload/
+          else
+            echo ">>> 未检测到共享 Scheme，直接通过 Target 编译..."
+            # 获取主 Target 名称
+            TARGET=$(xcodebuild -list -project Code.xcodeproj | awk '/Targets:/{flag=1; next} /Build Configurations:/{flag=0} flag' | sed -e 's/^[ \t]*//' | grep -E '^Code( App)?$' | head -n 1)
+            echo ">>> 正在编译 Target: [$TARGET]..."
+            
+            xcodebuild build \
+              -project Code.xcodeproj \
+              -target "$TARGET" \
+              -configuration Release \
+              -sdk iphoneos \
+              -derivedDataPath build \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY=""
+
+            mkdir -p Payload
+            cp -r build/Build/Products/Release-iphoneos/*.app Payload/
+          fi
+
+          # 打包成 IPA
           zip -r -q CodeApp.ipa Payload
           rm -rf Payload
 
-      - name: 上传 IPA 为制品 (Artifact)
+      - name: 上传 IPA 制品
         uses: actions/upload-artifact@v4
         with:
           name: CodeApp-IPA
