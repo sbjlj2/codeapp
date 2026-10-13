@@ -14,11 +14,14 @@ jobs:
 
       - name: 选择 Xcode 16 并安装 xcbeautify
         run: |
+          # 自动寻找 Runner 上的最新 Xcode 16 版本
           LATEST_XCODE=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -n 1)
           if [ -n "$LATEST_XCODE" ]; then
             sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
           fi
           xcodebuild -version
+          
+          # 用于精简日志，防止由于日志超长被 GitHub 截断
           brew install xcbeautify 2>/dev/null || true
 
       - name: 下载内置依赖库
@@ -26,27 +29,55 @@ jobs:
           chmod +x ./downloadFrameworks.sh
           ./downloadFrameworks.sh
 
-      - name: 修复 AppIcon 名称匹配问题
+      - name: 注入自定义 AppIcon (或空白占位)
         run: |
-          # 查找 Assets.xcassets 中现有的 App 图标集
-          EXISTING_ICON=$(find CodeApp/Assets.xcassets -name "*.appiconset" | head -n 1)
-          echo ">>> 查找到的原有图标集: $EXISTING_ICON"
-
-          if [ -n "$EXISTING_ICON" ]; then
-            # 复制一份作为 Iconv2.appiconset，彻底解决编译器找不到 Iconv2 的报错
-            cp -r "$EXISTING_ICON" CodeApp/Assets.xcassets/Iconv2.appiconset
-            echo ">>> 已成功创建 CodeApp/Assets.xcassets/Iconv2.appiconset"
+          ICON_DIR="CodeApp/Assets.xcassets/Iconv2.appiconset"
+          mkdir -p "$ICON_DIR"
+          
+          # 检测仓库根目录是否上传了自定义图标 app_icon.png
+          if [ -f "app_icon.png" ]; then
+            echo ">>> 找到 app_icon.png，正在应用自定义图标..."
+            cp app_icon.png "$ICON_DIR/icon.png"
+            
+            # 生成 Xcode 14+ 支持的单尺寸通用图标配置
+            cat <<EOF > "$ICON_DIR/Contents.json"
+            {
+              "images" : [
+                {
+                  "filename" : "icon.png",
+                  "idiom" : "universal",
+                  "platform" : "ios",
+                  "size" : "1024x1024"
+                }
+              ],
+              "info" : {
+                "author" : "xcode",
+                "version" : 1
+              }
+            }
+            EOF
+          else
+            echo ">>> 未找到 app_icon.png，回退使用空白占位图标..."
+            cat <<EOF > "$ICON_DIR/Contents.json"
+            {
+              "images" : [],
+              "info" : {
+                "author" : "xcode",
+                "version" : 1
+              }
+            }
+            EOF
           fi
 
       - name: 编译并生成 IPA
         run: |
           set -o pipefail
           
-          # 获取真实 Scheme
+          # 动态获取有效的 Scheme
           SCHEME=$(xcodebuild -list -project Code.xcodeproj | awk '/Schemes:/{flag=1; next} flag' | sed -e 's/^[ \t]*//' | grep -i 'Code' | head -n 1)
           echo ">>> 正在使用 Scheme: [$SCHEME] 编译..."
 
-          # 执行 Archive 构建
+          # 执行 Archive 构建，免签名
           xcodebuild archive \
             -project Code.xcodeproj \
             -scheme "$SCHEME" \
@@ -59,11 +90,10 @@ jobs:
             2>&1 | tee raw_build.log | xcbeautify || {
               echo "==================== 构建失败！提取核心错误日志 ===================="
               grep -E "(error:|\/\* com.apple.actool.errors \*\/)" -A 10 raw_build.log || tail -n 50 raw_build.log
-              echo "================================================================="
               exit 1
             }
 
-          # 提取 App 并打包为 IPA
+          # 提取打包为 IPA
           mkdir -p Payload
           cp -r build/Code.xcarchive/Products/Applications/*.app Payload/
           zip -r -q CodeApp.ipa Payload
@@ -77,7 +107,7 @@ jobs:
           path: CodeApp.ipa
           retention-days: 7
 
-      - name: 上传完整错误日志 (若失败自动保留)
+      - name: 上传完整错误日志 (仅在失败时)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
