@@ -12,57 +12,53 @@ jobs:
       - name: 检出仓库代码
         uses: actions/checkout@v4
 
-      - name: 设置 Xcode 版本
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+      - name: 切换为最新版 Xcode
+        run: |
+          echo "=== 当前 Runner 上安装的所有 Xcode 版本 ==="
+          ls -d /Applications/Xcode* || true
+          
+          # 优先使用 Xcode 16，若不存在则使用系统中最新默认版本
+          if [ -d "/Applications/Xcode_16.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+          elif [ -d "/Applications/Xcode_16.0.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.0.app/Contents/Developer
+          elif [ -d "/Applications/Xcode_16.1.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+          else
+            echo "使用系统默认最高版本 Xcode"
+          fi
+          xcodebuild -version
 
       - name: 下载内置依赖库
         run: |
           chmod +x ./downloadFrameworks.sh
           ./downloadFrameworks.sh
 
-      - name: 检查工程配置并编译打包
+      - name: 编译并生成 IPA
         run: |
-          echo "=== 查看工程中的 Targets 和 Schemes ==="
-          xcodebuild -list -project Code.xcodeproj
-
-          # 查找包含 Code 的 Scheme（优先匹配 "Code App"）
+          # 查找包含 Code 的 Scheme
           SCHEME=$(xcodebuild -list -project Code.xcodeproj | awk '/Schemes:/{flag=1; next} flag' | sed -e 's/^[ \t]*//' | grep -i 'Code' | head -n 1)
+          echo ">>> 正在使用 Scheme: [$SCHEME] 进行构建..."
 
-          if [ -n "$SCHEME" ]; then
-            echo ">>> 检测到有效 Scheme: [$SCHEME]，执行 Archive..."
-            xcodebuild archive \
-              -project Code.xcodeproj \
-              -scheme "$SCHEME" \
-              -configuration Release \
-              -destination 'generic/platform=iOS' \
-              -archivePath build/Code.xcarchive \
-              CODE_SIGNING_ALLOWED=NO \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGN_IDENTITY=""
+          xcodebuild archive \
+            -project Code.xcodeproj \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/Code.xcarchive \
+            -resultBundlePath build/ResultBundle.xcresult \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ASSETCATALOG_COMPILER_OPTIMIZATION=time || {
+              echo "!!! 编译失败，正在提取详细错误日志 !!!"
+              xcrun xcresulttool get --path build/ResultBundle.xcresult --format json 2>/dev/null || true
+              exit 1
+            }
 
-            mkdir -p Payload
-            cp -r build/Code.xcarchive/Products/Applications/*.app Payload/
-          else
-            echo ">>> 未检测到共享 Scheme，直接通过 Target 编译..."
-            # 获取主 Target 名称
-            TARGET=$(xcodebuild -list -project Code.xcodeproj | awk '/Targets:/{flag=1; next} /Build Configurations:/{flag=0} flag' | sed -e 's/^[ \t]*//' | grep -E '^Code( App)?$' | head -n 1)
-            echo ">>> 正在编译 Target: [$TARGET]..."
-            
-            xcodebuild build \
-              -project Code.xcodeproj \
-              -target "$TARGET" \
-              -configuration Release \
-              -sdk iphoneos \
-              -derivedDataPath build \
-              CODE_SIGNING_ALLOWED=NO \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGN_IDENTITY=""
-
-            mkdir -p Payload
-            cp -r build/Build/Products/Release-iphoneos/*.app Payload/
-          fi
-
-          # 打包成 IPA
+          # 提取 App 并打包为 IPA
+          mkdir -p Payload
+          cp -r build/Code.xcarchive/Products/Applications/*.app Payload/
           zip -r -q CodeApp.ipa Payload
           rm -rf Payload
 
